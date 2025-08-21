@@ -91,62 +91,24 @@ truncate_to() { # usage: truncate_to width "text"
   print -r -- "${s:0:$((w-1))}…"
 }
 
-# Wrap a string into fixed-width chunks (no word boundaries needed for SSH keys/paths)
-_wrap_chunks() {
-  local s="$1" w="$2" len="${#1}" i=1
-  local -a out
-  while (( i <= len )); do
-    out+=("${s[i,$w]}")
-    (( i += w ))
-  done
-  print -rl -- $out
-}
-
 print_ssh_table() {
-  tag "SSH keys summary"
+  tag "SSH public keys"
 
-  local w=$(cols)
-  # Column widths (tweak as desired)
-  local c1=16  # Key Name
-  local c2=44  # Absolute Path
-  local c3
-  (( c3 = w - c1 - c2 - 7 ))   # 7 = " | " x2 + margins
-  (( c3 < 24 )) && c3=24       # keep public key column usable
+  local c1=20   # .pub file name
+  local c2=60   # absolute path (.pub file)
 
-  # Header
-  printf "%-${c1}s | %-${c2}s | %-${c3}s\n" "Key Name" "Path" "Public Key (truncated)"
-  printf '%*s\n' "$w" '' | tr ' ' '-'
+  printf "%-${c1}s | %-${c2}s | %s\n" "Public Key File" "Absolute Path (.pub)" "Contents"
+  printf "%-${c1}s-+-%-${c2}s-+-%s\n" "" "" "" | tr ' ' '-'
 
-  local pub found=false
+  local found=false
+  local pub name abspath pk
   for pub in "$HOME/.ssh"/*.pub(N); do
     found=true
-    local name path abspath pk
-    name="${pub:t:r}"
-    path="${pub%.*}"
-    abspath="${path:a}"
-    pk="$(<"$pub")"
+    name="${pub:t}"         # e.g., id_ed25519.pub
+    abspath="${pub:a}"      # full path to .pub file
+    pk="$(<"$pub")"         # full key contents
 
-    # Build wrapped rows per column
-    local -a name_rows path_rows pk_rows
-    name_rows=($(_wrap_chunks "$name" $c1))
-    path_rows=($(_wrap_chunks "$abspath" $c2))
-    pk_rows=($(_wrap_chunks "$pk" $c3))
-
-    # Determine max row count for this key
-    local maxrows=${#name_rows}
-    (( ${#path_rows} > maxrows )) && maxrows=${#path_rows}
-    (( ${#pk_rows} > maxrows )) && maxrows=${#pk_rows}
-
-    # Print each wrapped row; only the first shows the key name
-    local i idx
-    for (( i=1; i<=maxrows; i++ )); do
-      local n="${name_rows[i]:-}"
-      local p="${path_rows[i]:-}"
-      local k="${pk_rows[i]:-}"
-      # Only show name on the first line of this entry
-      (( i > 1 )) && n=""
-      printf "%-${c1}s | %-${c2}s | %-${c3}s\n" "$n" "$p" "$k"
-    done
+    printf "%-${c1}s | %-${c2}s | %s\n" "$name" "$abspath" "$pk"
   done
 
   $found || warn "No public keys (*.pub) found in ~/.ssh"
@@ -467,21 +429,7 @@ if [[ -n "${RUN[6]:-}" ]]; then
     warn "ssh config missing Host github.com"
   fi
 
-#   # Test SSH (non-interactive)
-#   if ssh -T git@github.com -o BatchMode=yes -o StrictHostKeyChecking=accept-new 2>&1 | grep -qiE "success|successfully|Hi .*!"; then
-#     ok "SSH to GitHub works"
-#   else
-#     warn "SSH to GitHub not confirmed (keys may not be added or GitHub not configured)"
-#   fi
-
-  # Test SSH (robust handling of GitHub's behavior)
-if github_ssh_ok; then
-  ok "SSH to GitHub works"
-else
-  warn "SSH to GitHub not confirmed (keys may not be added or GitHub not configured)"
-fi
-
-  # Test SSH (robust handling of GitHub's behavior)
+ # Test SSH (robust handling of GitHub's behavior)
   if github_ssh_ok; then
     ok "SSH to GitHub works"
   else
