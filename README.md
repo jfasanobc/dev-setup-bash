@@ -81,3 +81,4 @@ You will be prompted to select which sections to run (`all` or a comma-separated
 
 # Install / fix mode
 ./mac_dev_setup.zsh -i
+```
