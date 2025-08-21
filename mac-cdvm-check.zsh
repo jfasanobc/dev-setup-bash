@@ -9,10 +9,27 @@ set -euo pipefail
 # -----------------------
 DO_INSTALL=false
 case "${1:-}" in
-  -i|--install) DO_INSTALL=true ;;
-  "" ) ;;
-  *  ) echo "Usage: $0 [--install|-i]"; exit 2 ;;
+  -i|--install)
+    DO_INSTALL=true
+    ;;
+  -v|--version)
+    VERSION_FILE="$(dirname "$0")/../VERSION"
+    if [[ -f "$VERSION_FILE" ]]; then
+      cat "$VERSION_FILE"
+    else
+      echo "unknown"
+    fi
+    exit 0
+    ;;
+  "" )
+    # no args: just continue into interactive checks
+    ;;
+  *  )
+    echo "Usage: $0 [--install|-i|--version|-v]"
+    exit 2
+    ;;
 esac
+
 
 BOLD=$'\033[1m'; RESET=$'\033[0m'
 GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; BLUE=$'\033[34m'
