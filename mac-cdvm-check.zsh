@@ -1,487 +1,569 @@
 #!/usr/bin/env zsh
-# mac_dev_setup.zsh
-# Interactive section selector; check-only by default, install with -i/--install.
-
 set -euo pipefail
+if [ -z "${ZSH_VERSION:-}" ]; then exec zsh "$0" "$@"; fi
 
-# -----------------------
-# Flags & globals
-# -----------------------
+###############
+# Flags & env #
+###############
 DO_INSTALL=false
-case "${1:-}" in
-  -i|--install)
-    DO_INSTALL=true
-    ;;
-  -v|--version)
-    VERSION_FILE="$(dirname "$0")/../VERSION"
-    if [[ -f "$VERSION_FILE" ]]; then
-      cat "$VERSION_FILE"
-    else
-      echo "unknown"
-    fi
-    exit 0
-    ;;
-  "" )
-    # no args: just continue into interactive checks
-    ;;
-  *  )
-    echo "Usage: $0 [--install|-i|--version|-v]"
-    exit 2
-    ;;
-esac
+VERBOSE=false
+INCLUDE_OPTIONAL=false
+DEBUG_UI=false
 
+# Parse flags (supports -i -o -v in any combination: -io, -ov, -iov, etc.)
+for arg in "$@"; do
+  case "$arg" in
+    --install)            DO_INSTALL=true ;;
+    --verbose)            VERBOSE=true ;;
+    --optional-software)  INCLUDE_OPTIONAL=true ;;
+    --debug-ui)           DEBUG_UI=true ;;
+    --help|-h)
+      cat <<USAGE
+Usage: $0 [--install|-i] [--verbose|-v] [--optional-software|-o] [--debug-ui]
+USAGE
+      exit 0 ;;
+    --*) echo "Unknown flag: $arg" >&2; exit 2 ;;
+    -*)
+      typeset ch
+      for ch in ${(s::)arg#-}; do
+        case "$ch" in
+          i) DO_INSTALL=true ;;
+          v) VERBOSE=true ;;
+          o) INCLUDE_OPTIONAL=true ;;
+          *) echo "Unknown flag: -$ch" >&2; exit 2 ;;
+        esac
+      done
+      ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 
-BOLD=$'\033[1m'; RESET=$'\033[0m'
-GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; BLUE=$'\033[34m'
-tag(){ [[ $DO_INSTALL == true ]] && printf "${BLUE}[INSTALL]${RESET} %s\n" "$1" || printf "${BLUE}[CHECK]${RESET} %s\n" "$1"; }
-ok(){  printf "   ${GREEN}✔${RESET} %s\n" "$1"; }
-warn(){printf "   ${YELLOW}▲${RESET} %s\n" "$1"; }
-err(){ printf "   ${RED}✘%s${RESET}\n" "${1:+ }$1"; MISSING=$((MISSING+1)); }
-die(){ printf "${RED}%s${RESET}\n" "$1"; exit 1; }
+####################
+# Pretty printing  #
+####################
+autoload -Uz colors; colors
+BOLD=$'%B'; DIM=$'%F{245}'; RED=$'%F{196}'; GREEN=$'%F{70}'; YELLOW=$'%F{178}'; BLUE=$'%F{39}'; RESET=$'%f%b'
+note() { print -P "${BLUE}${RESET} $*"; }
+ok()   { print -P "${GREEN}✔${RESET} $*"; }
+warn() { print -P "${YELLOW}▲${RESET} $*"; }
+fail() { print -P "${RED}✘${RESET} $*"; }
+title(){ print -P "\n${BOLD}$*${RESET}"; }
+section(){ print -P "\n${BOLD}=== $* ===${RESET}"; }
 
-[[ "$(uname -s)" == "Darwin" ]] || die "macOS only."
-
-MISSING=0
-REQUIRED_RUBY="3.2.6"
-ARCH="$(uname -m)" # arm64 or x86_64
-
-# Parse first.last from /Users/first.last
-USER_BASENAME="${HOME:t}" # zsh basename
-EMAIL_BC="${USER_BASENAME}@bigcommerce.com"
-
-# Ask GitHub username up-front
-read -r "?GitHub username: " GITHUB_USER
-
-# --- Terminal detection ---
-TERM_APP="${TERM_PROGRAM:-}"
-IS_ITERM=false
-IS_TERMINAL=false
-case "$TERM_APP" in
-  iTerm.app|iTerm2|iTerm) IS_ITERM=true ;;
-  Apple_Terminal|Apple\ Terminal) IS_TERMINAL=true ;;
-esac
-
-# we’ll set this later in the iTerm2 section if we want to print a note at the end
-NOTE_ITERM_HANDOFF=false
-
-# -----------------------
-# Helpers
-# -----------------------
-brew_shellenv() {
-  if [[ -d /opt/homebrew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [[ -d /usr/local/Homebrew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)"
+########################
+# Verbose runner       #
+########################
+vrun() {
+  if $VERBOSE; then
+    print -P "${DIM}$ ${(j: :)@}${RESET}"
+    eval "$@"
+  else
+    eval "$@" 1>/dev/null 2>/dev/null
   fi
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
+#########################
+# Terminal helpers      #
+#########################
+zmodload zsh/terminfo 2>/dev/null || true
+: ${terminfo[smcup]:=$'\e[?1049h'}
+: ${terminfo[rmcup]:=$'\e[?1049l'}
+enter_alt_screen() { print -n -- "${terminfo[smcup]}"; }
+leave_alt_screen() { print -n -- "${terminfo[rmcup]}"; }
+hide_cursor() { tput civis 2>/dev/null || print -n $'\e[?25l'; }
+show_cursor() { tput cnorm 2>/dev/null || print -n $'\e[?25h'; }
 
-confirm() {
-  local q="${1:-Proceed?} [y/N]: "
-  read -r "?$q" ans
-  [[ "$ans" == "y" || "$ans" == "Y" ]]
+# Read a single key; normalize to: up | down | space | enter | other
+get_keypress() {
+  typeset -g REPLY
+  local k rest seq
+  IFS= read -rsk1 k || return 1
+
+  [[ $k == $'\n' || $k == $'\r' ]] && { REPLY="enter"; return 0; }
+  [[ $k == " " ]]                    && { REPLY="space"; return 0; }
+
+  if [[ $k == $'\x1b' ]]; then
+    local b; local -i i=0
+    while IFS= read -rsk1 -t 0.01 b; do
+      rest+="$b"; (( ++i > 4 )) && break
+    done
+    seq="$k$rest"
+    case "$seq" in
+      $'\e[A'|$'\eOA'|${terminfo[kcuu1]:-}) REPLY="up";   return 0 ;;
+      $'\e[B'|$'\eOB'|${terminfo[kcud1]:-}) REPLY="down"; return 0 ;;
+    esac
+    REPLY=""; return 0
+  fi
+
+  REPLY="$k"; return 0
 }
 
-cols() { echo ${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}; }
-
-truncate_to() { # usage: truncate_to width "text"
-  local w="$1" s="$2"
-  (( ${#s} <= w )) && { print -r -- "$s"; return; }
-  print -r -- "${s:0:$((w-1))}…"
+#########################
+# Menu (single/multi)   #
+#########################
+fallback_single_select() {
+  local -a items; items=("$@"); local i
+  for i in {1..${#items[@]}}; do print "$i) ${items[$i]}"; done
+  print -n "Choose [1-${#items[@]}]: "; read -r i
+  [[ $i == <-> && $i -ge 1 && $i -le ${#items[@]} ]] || { echo "Invalid choice"; return 1; }
+  REPLY=$i
+}
+fallback_multi_select() {
+  local -a items; items=("$@"); local i sel
+  for i in {1..${#items[@]}}; do print "$i) ${items[$i]}"; done
+  print -n "Enter numbers to select (space/comma separated), or empty for none: "
+  IFS=', ' read -r sel
+  typeset -g -a SELECTED_INDEXES=()
+  for i in ${(s: :)sel}; do [[ $i == <-> && $i -ge 1 && $i -le ${#items[@]} ]] && SELECTED_INDEXES+=("$i"); done
+}
+menu_single_select() {
+  local arr="$1"; local -a items; items=("${(@P)arr}")
+  [[ -t 0 && -t 1 ]] || { fallback_single_select "${items[@]}" || return 1; return 0; }
+  enter_alt_screen; hide_cursor
+  local index=1 i
+  while true; do
+    tput clear; tput cup 0 0
+    print -P "${BOLD}Choose what to do:${RESET}\n"
+    for (( i=1; i<=${#items[@]}; i++ )); do
+      if [[ $i -eq $index ]]; then print -P "  ${BOLD}> ${items[$i]}${RESET}"; else print -P "    ${items[$i]}"; fi
+    done
+    get_keypress || { leave_alt_screen; show_cursor; fallback_single_select "${items[@]}" || return 1; return 0; }
+    case "$REPLY" in
+      up)   (( index = index > 1 ? index-1 : ${#items[@]} )) ;;
+      down) (( index = index < ${#items[@]} ? index+1 : 1 )) ;;
+      enter) leave_alt_screen; show_cursor; REPLY=$index; return 0 ;;
+    esac
+  done
+}
+menu_multi_select() {
+  typeset -g -a SELECTED_INDEXES=()
+  local arr="$1"; local -a items; items=("${(@P)arr}")
+  [[ -t 0 && -t 1 ]] || { fallback_multi_select "${items[@]}"; return 0; }
+  enter_alt_screen; hide_cursor
+  local index=1 i checked; local -A selected_map
+  while true; do
+    tput clear; tput cup 0 0
+    print -P "${BOLD}Pick tasks to run (space to toggle, move to 'Proceed' and press Enter)${RESET}\n"
+    for (( i=1; i<=${#items[@]}; i++ )); do
+      [[ -n ${selected_map[$i]-} ]] && checked="${GREEN}●${RESET}" || checked="○"
+      if [[ $i -eq $index ]]; then print -P "  ${BOLD}> $checked ${items[$i]}${RESET}"; else print -P "    $checked ${items[$i]}"; fi
+    done
+    local proceed_row=$(( ${#items[@]} + 1 ))
+    if [[ $index -eq $proceed_row ]]; then print -P "  ${BOLD}> Proceed${RESET}"; else print -P "    Proceed"; fi
+    get_keypress || { leave_alt_screen; show_cursor; fallback_multi_select "${items[@]}"; return 0; }
+    case "$REPLY" in
+      up)   (( index = index > 1 ? index-1 : proceed_row )) ;;
+      down) (( index = index < proceed_row ? index+1 : 1 )) ;;
+      space) (( index <= ${#items[@]} )) && { [[ -n ${selected_map[$index]-} ]] && unset "selected_map[$index]" || selected_map[$index]=1; } ;;
+      enter) if (( index == proceed_row )); then
+               leave_alt_screen; show_cursor
+               SELECTED_INDEXES=("${(@k)selected_map}")
+               IFS=$'\n' SELECTED_INDEXES=($(sort -n <<< "${(F)SELECTED_INDEXES}"))
+               return 0
+             fi ;;
+    esac
+  done
 }
 
-print_ssh_table() {
-  tag "SSH public keys"
+#################
+# OS detection  #
+#################
+ARCH="$(uname -m)"; APPLE_SILICON=false; [[ "$ARCH" == "arm64" ]] && APPLE_SILICON=true
+HOMEDIR="$HOME"; USER_SHORT="$(basename "$HOMEDIR")"; COMPANY_DOMAIN="bigcommerce.com"
 
-  local c1=20   # .pub file name
-  local c2=60   # absolute path (.pub file)
+typeset -a TODO_ITEMS_TASKS=() TODO_ITEMS_MSGS=() RUN_LOG=()
+queue_issue(){ TODO_ITEMS_TASKS+=("$1"); TODO_ITEMS_MSGS+=("$2"); warn "$2"; RUN_LOG+=("! $2"); }
 
-  printf "%-${c1}s | %-${c2}s | %s\n" "Public Key File" "Absolute Path (.pub)" "Contents"
-  printf "%-${c1}s-+-%-${c2}s-+-%s\n" "" "" "" | tr ' ' '-'
+############################
+# Task registry & helpers  #
+############################
+typeset -A TASK_FN TASK_LABEL
+register_task(){ TASK_LABEL["$1"]="$2"; TASK_FN["$1"]="$3"; }
 
-  local found=false
-  local pub name abspath pk
-  for pub in "$HOME/.ssh"/*.pub(N); do
-    found=true
-    name="${pub:t}"         # e.g., id_ed25519.pub
-    abspath="${pub:a}"      # full path to .pub file
-    pk="$(<"$pub")"         # full key contents
+append_unique_line_to_file(){
+  local file="$1" line="$2"; touch "$file"; chmod 600 "$file"
+  grep -qxF "$line" "$file" || print -- "$line" >> "$file"
+}
+ensure_ssh_agent_zshrc_lines() {
+  local zrc="$HOME/.zshrc"
+  append_unique_line_to_file "$zrc" ''
+  append_unique_line_to_file "$zrc" '# --- ssh-agent autostart ---'
+  append_unique_line_to_file "$zrc" 'if ! pgrep -x ssh-agent >/dev/null; then'
+  append_unique_line_to_file "$zrc" '  eval "$(ssh-agent -s)" >/dev/null'
+  append_unique_line_to_file "$zrc" 'fi'
+  append_unique_line_to_file "$zrc" '# Load common keys quietly if present'
+  append_unique_line_to_file "$zrc" '[ -f ~/.ssh/id_ed25519 ]     && ssh-add -q ~/.ssh/id_ed25519     2>/dev/null'
+  append_unique_line_to_file "$zrc" '[ -f ~/.ssh/gh_ed25519 ]     && ssh-add -q ~/.ssh/gh_ed25519     2>/dev/null'
+  append_unique_line_to_file "$zrc" '[ -f ~/.ssh/gcloud_ed25519 ] && ssh-add -q ~/.ssh/gcloud_ed25519 2>/dev/null'
+}
 
-    printf "%-${c1}s | %-${c2}s | %s\n" "$name" "$abspath" "$pk"
+############################
+# 1) Homebrew
+############################
+task_brew() {
+  section "Homebrew"
+  local expected_prefix actual_prefix
+  expected_prefix=$($APPLE_SILICON && echo /opt/homebrew || echo /usr/local)
+  if vrun "command -v brew"; then
+    actual_prefix="$(brew --prefix 2>/dev/null || true)"
+    print "brew --prefix -> ${actual_prefix:-<none>}"
+    if [[ "$actual_prefix" == "$expected_prefix" ]]; then
+      ok "Homebrew installed at ${actual_prefix} (correct for ${ARCH})."
+      RUN_LOG+=("✓ Homebrew OK (${actual_prefix})")
+    else
+      queue_issue "brew_fix" "Homebrew at ${actual_prefix}, expected ${expected_prefix}."
+      $DO_INSTALL && note "Recommend reinstalling at ${expected_prefix}."
+    fi
+  else
+    queue_issue "brew_install" "Homebrew not installed."
+    if $DO_INSTALL; then
+      note "Installing Homebrew…"
+      vrun '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+      if vrun "command -v brew"; then ok "Homebrew installed."; RUN_LOG+=("✓ Homebrew installed")
+      else fail "Homebrew install did not complete."; fi
+    fi
+  fi
+}
+
+############################################
+# 2) Optional software (if chosen) first
+############################################
+install_brew_pkg_if_needed() {
+  local pkg="$1"
+  if vrun "brew list --cask $pkg" || vrun "brew list $pkg"; then
+    ok "$pkg already installed."; RUN_LOG+=("• $pkg already installed"); return 0
+  fi
+  if $DO_INSTALL; then
+    note "Installing $pkg…"
+    if vrun "brew info --cask $pkg"; then vrun "brew install --cask $pkg"; else vrun "brew install $pkg"; fi
+    ok "$pkg installed."; RUN_LOG+=("✓ Installed $pkg")
+  else
+    queue_issue "install_$pkg" "$pkg not installed."
+  fi
+}
+task_optional_software() {
+  section "Optional Software"
+  if vrun "command -v gh"; then ok "GitHub CLI present."; RUN_LOG+=("• gh present")
+  else if $DO_INSTALL; then install_brew_pkg_if_needed "gh"; else queue_issue "install_gh" "GitHub CLI not installed."; fi; fi
+  if [[ -d "/Applications/iTerm.app" ]] || vrun "brew list --cask iterm2"; then ok "iTerm2 present."; RUN_LOG+=("• iTerm2 present")
+  else if $DO_INSTALL; then install_brew_pkg_if_needed "iterm2"; else queue_issue "install_iterm2" "iTerm2 not installed."; fi; fi
+  if [[ -d "/Applications/DBeaver.app" ]] || vrun "brew list --cask dbeaver-community"; then ok "DBeaver Community present."; RUN_LOG+=("• DBeaver Community present")
+  else if $DO_INSTALL; then install_brew_pkg_if_needed "dbeaver-community"; else queue_issue "install_dbeaver" "DBeaver Community not installed."; fi; fi
+}
+
+########################
+# 3) SSH Configuration #
+########################
+generate_ssh_key(){
+  local file="$HOME/.ssh/$1" comment="${2:-$USER_SHORT@$COMPANY_DOMAIN}"
+  if [[ -f "$file" ]]; then warn "Key $file exists; skipping."; RUN_LOG+=("• $1 exists")
+  else note "Generating $file…"; vrun "ssh-keygen -t ed25519 -C \"$comment\" -f \"$file\" -N ''"; ok "Generated $file"; RUN_LOG+=("✓ Generated $1"); fi
+}
+task_ssh() {
+  section "SSH Configuration"
+  vrun "mkdir -p \"$HOME/.ssh\""
+  vrun "chmod 700 \"$HOME/.ssh\""
+
+  local keys; keys=("$HOME"/.ssh/*.pub(N))
+  if (( ${#keys[@]} )); then ok "Found SSH public keys:"; for k in "${keys[@]}"; do print " - $k"; done; RUN_LOG+=("• SSH keys present")
+  else warn "No SSH public keys found"; queue_issue "ssh_no_keys" "No SSH keys found."; fi
+
+  if vrun "pgrep -u \"$USER\" ssh-agent"; then ok "ssh-agent is running."; RUN_LOG+=("• ssh-agent running")
+  else warn "ssh-agent is not running."; queue_issue "ssh_agent" "ssh-agent not running."
+       if $DO_INSTALL; then vrun 'eval "$(ssh-agent -s)"'; ok "Started ssh-agent."; RUN_LOG+=("✓ started ssh-agent"); fi
+  fi
+
+  if [[ -f "$HOME/.ssh/config" ]]; then ok "~/.ssh/config exists."
+  else
+    warn "~/.ssh/config missing."
+    if $DO_INSTALL; then vrun ": > \"$HOME/.ssh/config\""; vrun "chmod 600 \"$HOME/.ssh/config\""; ok "Created ~/.ssh/config"; RUN_LOG+=("✓ created ssh config")
+    else queue_issue "ssh_config" "~/.ssh/config missing."; fi
+  fi
+
+  if vrun "ssh-add -l"; then ok "Keys present in ssh-agent."
+  else warn "No keys in ssh-agent."; queue_issue "ssh_agent_add" "No keys in ssh-agent."; fi
+
+  if $DO_INSTALL; then
+    print -n "Generate SSH keys now? (y/N): "; read -r ans
+    if [[ "$ans" == [yY]* ]]; then
+      local choices=("Single common key (id_ed25519)" "Separate: gh_ed25519 + gcloud_ed25519")
+      menu_single_select choices
+      if [[ "$REPLY" -eq 1 ]]; then
+        generate_ssh_key "id_ed25519" "$USER_SHORT@$COMPANY_DOMAIN"; vrun "ssh-add \"$HOME/.ssh/id_ed25519\""
+      else
+        generate_ssh_key "gh_ed25519" "$USER_SHORT@$COMPANY_DOMAIN"; vrun "ssh-add \"$HOME/.ssh/gh_ed25519\""
+        generate_ssh_key "gcloud_ed25519" "$USER_SHORT@$COMPANY_DOMAIN"; vrun "ssh-add \"$HOME/.ssh/gcloud_ed25519\""
+      fi
+      ok "SSH keys generated/added." ; RUN_LOG+=("✓ keys generated/added")
+    fi
+    ensure_ssh_agent_zshrc_lines; ok "Configured ssh-agent autostart in ~/.zshrc"; RUN_LOG+=("✓ zshrc autostart for ssh-agent")
+  fi
+}
+
+##############
+# 4) Xcode   #
+##############
+task_xcode() {
+  section "Xcode / Command Line Tools"
+  local have_clt=false have_xcode=false license_ok=false
+  if vrun "xcode-select -p"; then have_clt=true; ok "Command Line Tools installed."; RUN_LOG+=("• CLT installed")
+  else warn "CLT not installed."; queue_issue "clt_install" "Xcode CLT not installed."; fi
+
+  [[ -d /Applications/Xcode.app ]] && { have_xcode=true; ok "Xcode app installed."; } || warn "Xcode app not found."
+
+  if vrun "xcodebuild -license status"; then license_ok=true; ok "Xcode license accepted."
+  else warn "Xcode license not accepted."; queue_issue "xcode_license" "License not accepted."; fi
+
+  if $DO_INSTALL; then
+    $have_clt || { note "Triggering CLT installer (GUI)…"; vrun "xcode-select --install || true"; }
+    $license_ok || $have_xcode && { note "Opening Xcode license…"; vrun "sudo xcodebuild -license || true"; }
+  fi
+}
+
+#########################
+# 5) Ruby via rbenv     #
+#########################
+task_rbenv_ruby(){
+  section "Ruby Environment (rbenv)"
+  local want_ver="3.2.6" have_rbenv=false installed_v="" rbv=""
+  if vrun "command -v rbenv"; then
+    have_rbenv=true; installed_v="$(rbenv --version 2>/dev/null || true)"
+    print "rbenv --version -> ${installed_v:-<none>}"
+    ok "rbenv present."; RUN_LOG+=("• rbenv present")
+  else
+    warn "rbenv not installed."; queue_issue "rbenv_install" "rbenv not installed."
+  fi
+
+  local deps=(libyaml readline openssl@3 gmp zlib)
+  for d in "${deps[@]}"; do
+    if vrun "brew list $d"; then ok "$d installed (brew)."
+    else
+      warn "$d missing."; queue_issue "dep_$d" "$d not installed."
+      $DO_INSTALL && vrun "brew install $d" && ok "Installed $d" && RUN_LOG+=("✓ $d installed")
+    fi
   done
 
-  $found || warn "No public keys (*.pub) found in ~/.ssh"
-}
+  $have_rbenv || { $DO_INSTALL && vrun "brew install rbenv" && ok "Installed rbenv." && RUN_LOG+=("✓ rbenv installed"); }
 
-ensure_ssh_agent_autostart() {
-  local cfg="$HOME/.zshrc"
-  local marker="# >>> ssh-agent autostart >>>"
-  if ! grep -q "$marker" "$cfg" 2>/dev/null; then
-    tag "Adding ssh-agent autostart to ~/.zshrc"
-    cat >> "$cfg" <<'EOF'
-
-# >>> ssh-agent autostart >>>
-if ! pgrep -qx ssh-agent >/dev/null; then
-  eval "$(ssh-agent -s)" >/dev/null
-fi
-# <<< ssh-agent autostart <<<
-EOF
-    ok "Updated ~/.zshrc with ssh-agent autostart"
+  if ! grep -q 'rbenv init' "$HOME/.zshrc" 2>/dev/null; then
+    note "Adding rbenv init to ~/.zshrc"
+    {
+      echo ''
+      echo '# rbenv init'
+      echo 'export PATH="$HOME/.rbenv/bin:$PATH"'
+      echo 'eval "$(rbenv init - zsh)"'
+    } >> "$HOME/.zshrc"
+    ok "Added rbenv init lines."; RUN_LOG+=("✓ rbenv init added to zshrc")
   else
-    ok "ssh-agent autostart already present in ~/.zshrc"
-  fi
-}
-
-ssh_start_agent() {
-  if pgrep -qx ssh-agent >/dev/null 2>&1; then
-    ok "ssh-agent already running"
-  else
-    eval "$(ssh-agent -s)" >/dev/null
-    ok "ssh-agent started"
-  fi
-}
-
-ssh_add_if_exists() {
-  local key="$1"
-  [[ -f "$key" ]] || return 0
-  if ssh-add -l 2>/dev/null | grep -q " ${key}$"; then
-    ok "Key already added: $key"
-  else
-    ssh-add --apple-use-keychain "$key" 2>/dev/null || ssh-add "$key"
-    ok "Added key: $key"
-  fi
-}
-
-github_ssh_ok() {
-  # Capture both stdout/stderr; don’t fail function on non-zero exit
-  local out rc
-  out="$(ssh -T git@github.com \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=accept-new \
-            -o ConnectTimeout=7 2>&1 || true)"
-  rc=$?
-
-  # Treat these as success (GitHub prints them on successful auth)
-  if print -r -- "$out" | grep -qiE 'successfully authenticated|does not provide shell access|^hi .*!$'; then
-    return 0
+    ok "~/.zshrc already initializes rbenv."
   fi
 
-  # Uncomment if you want to debug:
-  # warn "GitHub SSH output (rc=$rc):\n$out"
-
-  return 1
-}
-
-# -----------------------
-# Section selector
-# -----------------------
-print_menu() {
-  cat <<MENU
-${BOLD}Choose sections (comma-separated) or 'all':${RESET}
-  1) SSH
-  2) Homebrew
-  3) iTerm2
-  4) Xcode / Command Line Tools
-  5) Ruby Environment (rbenv/Ruby $REQUIRED_RUBY)
-  6) GitHub / GitHub CLI
-MENU
-}
-print_menu
-read -r "?Selection: " SEL
-[[ "$SEL" == "all" ]] && SEL="1,2,3,4,5,6"
-typeset -A RUN; for n in ${(s:,:)SEL}; do RUN[$n]=1; done
-
-# =======================
-# 1) SSH
-# =======================
-if [[ -n "${RUN[1]:-}" ]]; then
-  tag "SSH: enumerate keys and config"
-  mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
-  [[ -f "$HOME/.ssh/config" ]] || { touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"; ok "Created ~/.ssh/config"; }
-  print_ssh_table
-
-  if $DO_INSTALL; then
-    tag "SSH: key generation (install mode)"
-    echo "Use one key for everything or separate keys?"
-    echo "  1) Single key (default name: id_ed25519)"
-    echo "  2) Two keys (GitHub + Google Cloud)"
-    read -r "?Choice [1/2]: " CH; CH="${CH:-1}"
-
-    if [[ "$CH" == "1" ]]; then
-      read -r "?Preferred key name [id_ed25519]: " KEYNAME; KEYNAME="${KEYNAME:-id_ed25519}"
-      localpath="$HOME/.ssh/$KEYNAME"
-      if [[ -f "$localpath" || -f "$localpath.pub" ]]; then
-        warn "Key $KEYNAME already exists, skipping generation."
-      else
-        ssh-keygen -t ed25519 -C "$EMAIL_BC" -f "$localpath" -N ""
-        ok "Generated $localpath"
-      fi
-      ssh_start_agent
-      ensure_ssh_agent_autostart
-      ssh_add_if_exists "$localpath"
-
-    else
-      read -r "?GitHub key name [gh_ed25519]: " GHKEY; GHKEY="${GHKEY:-gh_ed25519}"
-      read -r "?Google Cloud key name [gcloud_ed25519]: " GCKEY; GCKEY="${GCKEY:-gcloud_ed25519}"
-
-      for key in "$GHKEY" "$GCKEY"; do
-        localpath="$HOME/.ssh/$key"
-        if [[ -f "$localpath" || -f "$localpath.pub" ]]; then
-          warn "Key $key already exists, skipping."
+  if vrun "command -v ruby"; then
+    rbv="$(ruby -v 2>/dev/null || true)"; print "ruby -v -> ${rbv:-<none>}"
+    if [[ "$rbv" != *"$want_ver"* ]]; then
+      warn "Ruby is not $want_ver (Cloud Dev Env may require $want_ver)."
+      if $DO_INSTALL; then
+        print -n "Install Ruby $want_ver with rbenv now? (y/N): "; read -r a
+        if [[ "$a" == [yY]* ]]; then
+          vrun "rbenv install -s $want_ver"
+          vrun "rbenv global $want_ver"
+          vrun "rbenv rehash"
+          ok "Ruby $want_ver installed & set."; RUN_LOG+=("✓ Ruby $want_ver set")
+          vrun "ruby -v"
         else
-          ssh-keygen -t ed25519 -C "$EMAIL_BC" -f "$localpath" -N ""
-          ok "Generated $localpath"
+          queue_issue "ruby_version" "Ruby not set to $want_ver."
         fi
-      done
-
-      ssh_start_agent
-      ensure_ssh_agent_autostart
-      ssh_add_if_exists "$HOME/.ssh/$GHKEY"
-      ssh_add_if_exists "$HOME/.ssh/$GCKEY"
-    fi
-
-    print_ssh_table
-  fi
-fi
-
-# =======================
-# 2) Homebrew
-# =======================
-if [[ -n "${RUN[2]:-}" ]]; then
-  tag "Homebrew"
-  if have brew; then
-    ok "brew at $(command -v brew)"
-    brew --version | head -n1
-    # Check “right” location for arch
-    if [[ "$ARCH" == "arm64" && "$(command -v brew)" != /opt/homebrew/* ]]; then
-      err "Apple Silicon detected but brew is not under /opt/homebrew"
-    elif [[ "$ARCH" == "x86_64" && "$(command -v brew)" != /usr/local/* ]]; then
-      err "Intel detected but brew is not under /usr/local"
-    else
-      ok "Homebrew location matches architecture ($ARCH)"
-    fi
-  else
-    err "Homebrew not installed"
-  fi
-
-  if $DO_INSTALL; then
-    brew_shellenv
-    if ! have brew; then
-      if [[ "$ARCH" == "arm64" ]]; then
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
       else
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        queue_issue "ruby_version" "Ruby not set to $want_ver."
       fi
-      brew_shellenv
-      ok "Homebrew installed"
     else
-      # Wrong location? Offer to uninstall old and reinstall.
-      bad=false
-      if [[ "$ARCH" == "arm64" && "$(command -v brew)" != /opt/homebrew/* ]]; then bad=true; fi
-      if [[ "$ARCH" == "x86_64" && "$(command -v brew)" != /usr/local/* ]]; then bad=true; fi
-      if $bad; then
-        warn "Homebrew install path does not match architecture."
-        if confirm "Uninstall current Homebrew and reinstall for $ARCH?"; then
-          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/uninstall.sh)"
-          ok "Uninstalled old Homebrew"
-          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          brew_shellenv
-          ok "Reinstalled Homebrew for $ARCH"
-        else
-          warn "Skipped Homebrew reinstall"
-        fi
-      fi
+      ok "Ruby version is $want_ver."
     fi
-  fi
-fi
-
-# =======================
-# 3) iTerm2
-# =======================
-if [[ -n "${RUN[3]:-}" ]]; then
-  tag "iTerm2"
-
-  local ITERM_INSTALLED=false
-  if [[ -d "/Applications/iTerm.app" ]] || mdfind "kMDItemCFBundleIdentifier == 'com.googlecode.iterm2'" | grep -q .; then
-    ok "iTerm2 present"
-    ITERM_INSTALLED=true
   else
-    err "iTerm2 not found"
+    warn "ruby not found in PATH."; queue_issue "ruby_missing" "Ruby binary not found."
   fi
+}
 
-  if have brew && brew list --cask iterm2 >/dev/null 2>&1; then
-    ok "Installed via Homebrew Cask"
-  fi
-
-  if $DO_INSTALL && [[ "$ITERM_INSTALLED" == "false" ]]; then
-    have brew || die "Brew required to install iTerm2"
-    brew install --cask iterm2
-    ok "iTerm2 installed"
-    ITERM_INSTALLED=true
-  fi
-
-  # Behavior differs by host terminal:
-  if $IS_ITERM; then
-    ok "Running inside iTerm2; no handoff actions needed."
-  else
-    # We are in Terminal.app or another terminal; we won’t try to switch mid-run.
-    # We’ll print a helpful note at the end.
-    NOTE_ITERM_HANDOFF=true
-  fi
-fi
-
-# =======================
-# 4) Xcode / CLT
-# =======================
-if [[ -n "${RUN[4]:-}" ]]; then
-  tag "Xcode / Command Line Tools"
-  if xcode-select -p >/dev/null 2>&1; then
-    ok "Command Line Tools installed"
-  else
-    err "Command Line Tools not installed"
-  fi
-
-  if [[ -d "/Applications/Xcode.app" ]]; then
-    ok "Xcode.app present"
-  else
-    warn "Xcode.app not found (IDE is optional for many workflows)"
-  fi
-
-  # License acceptance check
-  if /usr/bin/xcrun clang -v >/dev/null 2>&1; then
-    ok "Xcode license appears accepted"
-  else
-    warn "Xcode license may not be accepted (run: sudo xcodebuild -license)"
-  fi
-
-  if $DO_INSTALL; then
-    echo "Open ${BOLD}Self Service${RESET}, search for ${BOLD}Xcode${RESET}, and install."
-    if confirm "Open Self Service now?"; then open -a "Self Service" || warn "Self Service not found"; fi
-    if confirm "After installing Xcode/CLT, re-run checks now?"; then
-      if xcode-select -p >/dev/null 2>&1; then ok "CLT detected"; else err "CLT still missing"; fi
-      [[ -d "/Applications/Xcode.app" ]] && ok "Xcode.app present" || warn "Xcode.app not found"
-    else
-      die "Paused due to Xcode/CLT requirement. Please complete install and re-run."
-    fi
-  fi
-fi
-
-# =======================
-# 5) Ruby / rbenv
-# =======================
-if [[ -n "${RUN[5]:-}" ]]; then
-  tag "rbenv / Ruby $REQUIRED_RUBY"
-  if have rbenv; then
-    ok "rbenv at $(command -v rbenv)"
-    rbenv --version || true
-  else
-    err "rbenv not installed"
-  fi
-
-  # Dependencies (just check common ones)
-  if have brew; then
-    brew list --versions libyaml >/dev/null 2>&1 && ok "libyaml installed (brew)" || err "libyaml missing"
-  else
-    warn "Brew not present; skipping libyaml check"
-  fi
-
-  if have rbenv && rbenv prefix "$REQUIRED_RUBY" >/dev/null 2>&1; then
-    ok "Ruby $REQUIRED_RUBY installed under rbenv"
-  else
-    err "Ruby $REQUIRED_RUBY not installed under rbenv"
-  fi
-
-  if have rbenv; then
-    global_rb="$(rbenv global 2>/dev/null || true)"
-    [[ "$global_rb" == "$REQUIRED_RUBY" ]] && ok "Global Ruby set to $REQUIRED_RUBY" || warn "Global Ruby is $global_rb"
-    which_ruby="$(command -v ruby || true)"; [[ -n "$which_ruby" ]] && ok "ruby resolves to $which_ruby" || err "ruby not on PATH"
-    ruby -v || true
-  fi
-
-  if $DO_INSTALL; then
-    have brew || die "Brew required for rbenv/libyaml install"
-    brew install rbenv libyaml || true
-    export PATH="$HOME/.rbenv/bin:$PATH"
-    eval "$(rbenv init - zsh)" || true
-    if ! grep -q 'rbenv init - zsh' "$HOME/.zshrc" 2>/dev/null; then
-      print >> "$HOME/.zshrc" -- '\n# rbenv\nexport PATH="$HOME/.rbenv/bin:$PATH"\neval "$(rbenv init - zsh)"'
-      ok "Appended rbenv init to ~/.zshrc"
-    fi
-    if ! rbenv prefix "$REQUIRED_RUBY" >/dev/null 2>&1; then
-      RUBY_CONFIGURE_OPTS="--with-openssl-dir=$(brew --prefix openssl@3 2>/dev/null || echo /usr)" rbenv install "$REQUIRED_RUBY"
-      ok "Installed Ruby $REQUIRED_RUBY"
-    fi
-    rbenv global "$REQUIRED_RUBY"; rbenv rehash
-    ok "Set Ruby $REQUIRED_RUBY global"
-  fi
-fi
-
-# =======================
-# 6) GitHub / gh
-# =======================
-if [[ -n "${RUN[6]:-}" ]]; then
-  tag "GitHub SSH & gh CLI"
-  # SSH config entry
-  if grep -q '^Host github.com' "$HOME/.ssh/config" 2>/dev/null; then
-    ok "ssh config has Host github.com"
-  else
-    warn "ssh config missing Host github.com"
-  fi
-
- # Test SSH (robust handling of GitHub's behavior)
-  if github_ssh_ok; then
-    ok "SSH to GitHub works"
-  else
-    warn "SSH to GitHub not confirmed (keys may not be added or GitHub not configured)"
-  fi
-
-  # gh CLI
-  if have gh; then
-    ok "gh CLI present: $(gh --version | head -n1)"
-    gh auth status || true
-  else
-    err "gh CLI not installed"
-  fi
-
-  if $DO_INSTALL; then
-    # Add minimal ssh config for GitHub if missing
-    if ! grep -q '^Host github.com' "$HOME/.ssh/config" 2>/dev/null; then
-      cat >> "$HOME/.ssh/config" <<'EOF'
+#############
+# 6) GitHub #
+#############
+ensure_github_host_config(){
+  local cfg="$HOME/.ssh/config"; touch "$cfg"; chmod 600 "$cfg"
+  if ! grep -q '^Host github.com' "$cfg"; then
+    print -P "${DIM}Adding Host github.com stanza to ~/.ssh/config${RESET}"
+    local ident="~/.ssh/gh_ed25519"; [[ -f "$HOME/.ssh/gh_ed25519" ]] || ident="~/.ssh/id_ed25519"
+    cat >> "$cfg" <<EOF
 
 Host github.com
   HostName github.com
   User git
   AddKeysToAgent yes
-  UseKeychain yes
-  IdentityFile ~/.ssh/id_ed25519
+  IdentityFile $ident
+  IdentitiesOnly yes
 EOF
-      ok "Added basic Host github.com to ~/.ssh/config"
-    fi
+    ok "Wrote github.com host block."; RUN_LOG+=("✓ ssh config: github.com block")
+  else
+    ok "github.com host block exists."
+  fi
+}
+task_github(){
+  section "GitHub"
+  if vrun "ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes"; then
+    ok "SSH to GitHub works."; RUN_LOG+=("• SSH to GitHub OK")
+  else
+    warn "SSH to GitHub failed."; queue_issue "gh_ssh" "SSH to GitHub not working."
+  fi
+  local gname gemail; gname="$(git config --global user.name || true)"; gemail="$(git config --global user.email || true)"
+  [[ -n "$gname"  ]] && ok "git user.name: $gname"  || { warn "git user.name not set";  queue_issue "git_name"  "git user.name not set"; }
+  [[ -n "$gemail" ]] && ok "git user.email: $gemail" || { warn "git user.email not set"; queue_issue "git_email" "git user.email not set"; }
+  if [[ -f "$HOME/.ssh/config" ]] && grep -q '^Host github.com' "$HOME/.ssh/config"; then ok "~/.ssh/config has Host github.com"
+  else warn "~/.ssh/config missing Host github.com"; queue_issue "ssh_host_github" "Add Host github.com to ssh config."; fi
 
-    have brew || die "Brew required to install gh"
-    brew install gh || true
-    if confirm "Start gh auth flow now?"; then
-      gh auth login -h github.com
-      ok "Returned from gh auth; re-testing SSH…"
-      ssh -T git@github.com -o BatchMode=yes -o StrictHostKeyChecking=accept-new || true
+  if $DO_INSTALL; then
+    local ghuser; print -n "Enter your GitHub username: "; read -r ghuser
+    [[ -n "$ghuser" ]] && { vrun "git config --global user.name \"$ghuser\""; ok "Set git user.name to $ghuser"; RUN_LOG+=("✓ git user.name set"); }
+    local email="$USER_SHORT@$COMPANY_DOMAIN"; vrun "git config --global user.email \"$email\""; ok "Set git user.email to $email"; RUN_LOG+=("✓ git user.email set")
+    [[ -f "$HOME/.ssh/gh_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/gh_ed25519\"" || { [[ -f "$HOME/.ssh/id_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/id_ed25519\"" || true; }
+    ensure_github_host_config
+    if vrun "ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes"; then ok "SSH to GitHub now working."
+    else
+      warn "Still cannot SSH to GitHub."
+      if vrun "command -v gh"; then note "Launching 'gh auth login'…"; vrun "gh auth login || true"; fi
+      note "Docs: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account"
+      local keypath=""; [[ -f "$HOME/.ssh/gh_ed25519.pub" ]] && keypath="$HOME/.ssh/gh_ed25519.pub" || [[ -f "$HOME/.ssh/id_ed25519.pub" ]] && keypath="$HOME/.ssh/id_ed25519.pub"
+      [[ -n "$keypath" ]] && note "Public key to add: $keypath"
+    fi
+  fi
+}
+
+########################################
+# Register tasks (before execution!)
+########################################
+register_task "brew"            "Homebrew"                    "task_brew"
+register_task "optional_first"  "Optional Software (run first if selected)" "task_optional_software"
+register_task "ssh"             "SSH Configuration"           "task_ssh"
+register_task "xcode"           "Xcode & Command Line Tools"  "task_xcode"
+register_task "ruby"            "Ruby (rbenv) & 3.2.6"        "task_rbenv_ruby"
+register_task "github"          "GitHub Setup & SSH"          "task_github"
+
+########################
+# First selection flow #
+########################
+title "Mode Selection"
+if $DO_INSTALL; then
+  ok "Install flag detected: proceeding with Checks & Install."
+else
+  local top_choices=("Checks only" "Checks & Install")
+  print "Choose what to do:"
+  menu_single_select top_choices
+  case "$REPLY" in 1) DO_INSTALL=false ;; 2) DO_INSTALL=true ;; esac
+fi
+
+#########################
+# Which tasks to run    #
+#########################
+typeset -a menu_to_task menu_items; menu_items=(); menu_to_task=()
+if $INCLUDE_OPTIONAL; then
+  menu_items=("Homebrew" "Optional Software" "SSH" "Xcode" "Ruby (rbenv)" "GitHub")
+  menu_to_task=("brew" "optional_first" "ssh" "xcode" "ruby" "github")
+else
+  menu_items=("Homebrew" "SSH" "Xcode" "Ruby (rbenv)" "GitHub")
+  menu_to_task=("brew" "ssh" "xcode" "ruby" "github")
+fi
+
+menu_multi_select menu_items
+
+# Visible summary of choices
+title "Selections"
+MODE_LABEL=$($DO_INSTALL && echo "Checks & Install" || echo "Checks only")
+print "Mode:          $MODE_LABEL"
+if (( ${#SELECTED_INDEXES[@]} )); then
+  print "Tasks chosen:"; for idx in "${SELECTED_INDEXES[@]}"; do print " - ${menu_items[$idx]}"; done
+else
+  warn "No tasks selected—exiting."; exit 0
+fi
+
+#########################
+# Execute selected tasks#
+#########################
+# Build ordered list of task IDs to run
+typeset -a ordered_task_ids=()
+typeset idx tid have_optional=false
+for idx in "${SELECTED_INDEXES[@]}"; do
+  tid="${menu_to_task[$idx]}"
+  [[ "$tid" == "optional_first" ]] && have_optional=true
+done
+$have_optional && ordered_task_ids+=("optional_first")
+for idx in "${SELECTED_INDEXES[@]}"; do
+  tid="${menu_to_task[$idx]}"
+  [[ "$tid" == "optional_first" ]] && continue
+  ordered_task_ids+=("$tid")
+done
+
+# Only initialize brew env if needed (brew or ruby selected)
+needs_brew=false
+for tid in "${ordered_task_ids[@]}"; do
+  [[ "$tid" == "brew" || "$tid" == "ruby" ]] && needs_brew=true
+done
+if $needs_brew && vrun "command -v brew"; then
+  vrun 'eval "$(/usr/bin/env brew shellenv)"'
+fi
+
+# Run each selected task in order
+for tid in "${ordered_task_ids[@]}"; do
+  fn="${TASK_FN[$tid]-}"
+  if [[ -n "$fn" ]]; then
+    "$fn"
+  else
+    warn "No handler registered for task id: $tid"
+  fi
+done
+
+#######################################
+# Summary / outstanding items         #
+#######################################
+title "Summary"
+if (( ${#RUN_LOG[@]} )); then
+  for line in "${RUN_LOG[@]}"; do print " - $line"; done
+else
+  print " - No changes were necessary."
+fi
+
+if (( ${#TODO_ITEMS_MSGS[@]} )); then
+  print ""
+  warn "Items to fix (not resolved during this run):"
+  for msg in "${TODO_ITEMS_MSGS[@]}"; do print " - $msg"; done
+  print ""
+  print "Would you like to try to resolve any of these now?"
+  local again=("No (finish)" "Yes (select issues)"); menu_single_select again
+  if [[ "$REPLY" -eq 2 ]]; then
+    typeset -A dedup; for id in "${TODO_ITEMS_TASKS[@]}"; do dedup["$id"]=1; done
+    typeset -a issue_ids issue_labels
+    for id _ in "${(@kv)dedup}"; do issue_ids+=("$id"); issue_labels+=("${TASK_LABEL[$id]:-$id}"); done
+    if (( ${#issue_ids[@]} )); then
+      menu_multi_select issue_labels
+      if (( ${#SELECTED_INDEXES[@]} )); then
+        for idx in "${SELECTED_INDEXES[@]}"; do
+          id="${issue_ids[$idx]}"; fn2="${TASK_FN[$id]-}"
+          [[ -z "$fn2" ]] && { warn "No direct handler for: $id"; continue; }
+          section "Attempting: ${TASK_LABEL[$id]:-$id}"
+          "$fn2"
+        done
+      fi
     fi
   fi
 fi
 
-# -----------------------
-# Final result
-# -----------------------
-# --- Friendly note if we ran in Terminal.app (or other non-iTerm terminal) ---
-if $NOTE_ITERM_HANDOFF; then
-  printf "\n\033[1;33mNote:\033[0m You’re running this in Terminal.app (or another terminal).\n"
-  printf "      For the best experience, quit Terminal and open iTerm2:\n"
-  printf "        \033[1mopen -a iTerm\033[0m\n\n"
+##############################################
+# Final: Suggest iTerm2 if not currently in  #
+##############################################
+if $INCLUDE_OPTIONAL; then
+  if [[ "${TERM_PROGRAM:-}" != "iTerm.app" ]]; then
+    print ""
+    print -n "Open iTerm2 now? (y/N): "; read -r openit
+    if [[ "$openit" == [yY]* ]]; then open -a "iTerm" && ok "iTerm2 launching…" || warn "Could not open iTerm2."; fi
+    note "Consider closing Terminal and using iTerm2 going forward."
+  fi
 fi
 
-if (( MISSING > 0 )); then
-  printf "\n${RED}%d critical checks failed.${RESET}\n" "$MISSING"
-  exit 1
-else
-  printf "\n${GREEN}All selected sections completed.${RESET}\n"
-fi
+ok "All done."
