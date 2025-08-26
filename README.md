@@ -1,84 +1,77 @@
 # BCloud Local Environment Setup Script
 
-## Current Version: v2
+## Current Version: **v3.0.0**
 
-This script bootstraps and validates a local macOS development environment.  
-By default it runs in **check-only mode**; use the install flag to attempt to fix or install missing dependencies.  
-You will be prompted to select which sections to run (`all` or a comma-separated list).
+An interactive Zsh script that **checks** and (optionally) **installs/fixes** a macOS development environment.  
+v3 introduces a full-screen TUI with arrow-key navigation, space-to-toggle multi-selects, a “Proceed” row, and verbose logging.
 
 ---
 
-## Checks & Install Steps
+## What it checks / installs
 
-- [ ] **SSH**
-  - Always:
-    - Lists all SSH keys in `~/.ssh` with name, path, and public key (table format)
-    - Ensures `~/.ssh/config` exists
-    - Ensures `ssh-agent` is running
-    - Checks that `ssh-agent` autostart is present in `~/.zshrc`
-  - Install mode:
-    - Prompts for **single key** (default `id_ed25519`) or **separate keys** (`gh_ed25519` for GitHub, `gcloud_ed25519` for Cloud VM)
-    - Generates keys with `-C first.last@bigcommerce.com`
-    - Adds generated keys to `ssh-agent`
-    - Reprints SSH key table
+### ✅ Homebrew
+- Detects Apple Silicon vs Intel and verifies Homebrew is installed in the **correct prefix**  
+  (`/opt/homebrew` on Apple Silicon, `/usr/local` on Intel).
+- In install mode, installs Homebrew (or flags mis-located installs for remediation).
 
-- [ ] **Homebrew**
-  - Always:
-    - Verifies if Homebrew is installed and reports version
-    - Checks whether Homebrew is in the correct path for the machine’s architecture (`/opt/homebrew` for Apple Silicon, `/usr/local` for Intel)
-  - Install mode:
-    - Installs the appropriate Homebrew version for the detected processor type
-    - Can uninstall and reinstall if Homebrew is in the wrong location
+### ✅ Optional Software (runs first if selected)
+- **GitHub CLI (`gh`)**
+- **iTerm2**
+- **DBeaver Community**
+- Each item is checked; when install mode is enabled, missing items are installed via Homebrew.
 
-- [ ] **iTerm2**
-  - Always:
-    - Checks if iTerm2 is installed
-    - Detects whether iTerm2 was installed via Homebrew Cask
-  - Install mode:
-    - Installs iTerm2 with Homebrew if missing
-    - If currently running inside Terminal.app, launches iTerm2 and warns user to switch
+### ✅ SSH Configuration
+- Lists public keys in `~/.ssh` with full paths.
+- Ensures `~/.ssh/config` exists.
+- Checks `ssh-agent` is running and adds an **autostart block to `~/.zshrc`** (not a launchd plist).
+- In install mode:
+  - Prompts to generate either a **single key** (`id_ed25519`) or **separate keys**  
+    (`gh_ed25519` for GitHub, `gcloud_ed25519` for Google Cloud).
+  - Uses comment `first.last@bigcommerce.com` (derived from `$HOME`).
+  - Adds keys to `ssh-agent`.
 
-- [ ] **Xcode / Command Line Tools**
-  - Always:
-    - Checks if Command Line Tools are installed (`xcode-select -p`)
-    - Checks if full Xcode.app is present
-    - Checks if the Xcode license agreement is accepted
-  - Install mode:
-    - Prompts user to install Xcode via **Self Service** (Jamf)
-    - Offers to re-run checks after installation
-    - Exits with error if installation cannot be confirmed
+### ✅ Xcode / Command Line Tools
+- Verifies Command Line Tools (`xcode-select -p`), Xcode.app, and **license acceptance**.
+- Install mode:
+  - Triggers **CLT installer** when missing.
+  - Runs **`sudo xcodebuild -license accept`** when needed.
 
-- [ ] **Ruby Environment (rbenv)**
-  - Always:
-    - Checks if `rbenv` is installed
-    - Reports `rbenv` version
-    - Checks for Ruby build dependencies (e.g., `libyaml`)
-    - Verifies Ruby **3.2.6** is installed under rbenv
-    - Verifies Ruby **3.2.6** is set as the global version
-    - Reports `ruby -v` and active path
-  - Install mode:
-    - Installs `rbenv` and dependencies via Homebrew
-    - Appends `rbenv init` block to `~/.zshrc` if missing
-    - Installs Ruby 3.2.6 and sets it globally
+### ✅ Ruby (rbenv) & dependencies
+- Checks for `rbenv` and common Ruby build deps (`libyaml`, `readline`, `openssl@3`, `gmp`, `zlib`).
+- Verifies **Ruby 3.2.6** and offers to install + set global with `rbenv`.
+- Adds an `rbenv init` block to `~/.zshrc` if missing.
 
-- [ ] **GitHub / GitHub CLI**
-  - Always:
-    - Tests SSH connection to GitHub (`ssh -T git@github.com`)
-    - Checks for `Host github.com` entry in `~/.ssh/config`
-    - Checks if GitHub CLI (`gh`) is installed
-  - Install mode:
-    - Adds minimal SSH config entry for GitHub if missing
-    - Installs `gh` via Homebrew
-    - Runs `gh auth login` to complete GitHub authentication
+### ✅ GitHub
+- SSH connectivity test to GitHub.  
+  Recognizes GitHub’s **expected success message** (“successfully authenticated…does not provide shell access”) as **success**.
+- Verifies `git config --global user.name` and `user.email`.
+- Ensures a `Host github.com` block exists in `~/.ssh/config`.
+- Install mode can:
+  - Prompt for GitHub username and set global git config.
+  - Add the appropriate SSH key to `ssh-agent`.
+  - Run `gh auth login` when `gh` is available.
 
 ---
 
 ## Usage
 
 ```bash
-# Check mode (default)
-./mac_dev_setup.zsh
+# Make executable
+chmod +x mac-cdvm-check.zsh
 
-# Install / fix mode
-./mac_dev_setup.zsh -i
-```
+# Default: interactive + checks only
+./mac-cdvm-check.zsh
+
+# Install/fix everything you select (skips first “mode” prompt)
+./mac-cdvm-check.zsh -i
+
+# Include Optional Software (gh, iTerm2, DBeaver) in the task menu
+./mac-cdvm-check.zsh -o
+
+# Verbose mode: show each command that runs and keep its output on screen
+./mac-cdvm-check.zsh -v
+
+# Combine flags in any order
+./mac-cdvm-check.zsh -io
+./mac-cdvm-check.zsh -ov
+./mac-cdvm-check.zsh -iov
