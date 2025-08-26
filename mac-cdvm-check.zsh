@@ -13,23 +13,40 @@ DEBUG_UI=false
 # Parse flags (supports -i -o -v in any combination)
 for arg in "$@"; do
   case "$arg" in
-    --install|-i)           DO_INSTALL=true ;;
-    --verbose|-v)           VERBOSE=true ;;
-    --optional-software|-o) INCLUDE_OPTIONAL=true ;;
-    --debug-ui)             DEBUG_UI=true ;;
+    --install)            DO_INSTALL=true ;;
+    --verbose)            VERBOSE=true ;;
+    --optional-software)  INCLUDE_OPTIONAL=true ;;
+    --version)
+      local _script_dir _prefix _ver
+      _script_dir="${0:A:h}"
+      _prefix="${_script_dir}/.."
+
+      if [[ -f "${_prefix}/VERSION" ]]; then
+        _ver="$(<"${_prefix}/VERSION")"
+      else
+        _ver="unknown"
+      fi
+
+      print "dev-setup version: $_ver"
+      exit 0
+      ;;
     --help|-h)
       cat <<USAGE
-Usage: $0 [--install|-i] [--verbose|-v] [--optional-software|-o]
+Usage: $0 [--install|-i] [--verbose|-v] [--optional-software|-o] [--version]
 USAGE
       exit 0 ;;
     --*) echo "Unknown flag: $arg" >&2; exit 2 ;;
     -*)
-      typeset ch; for ch in ${(s::)arg#-}; do
+      typeset ch
+      for ch in ${(s::)arg#-}; do
         case "$ch" in
-          i) DO_INSTALL=true ;; v) VERBOSE=true ;; o) INCLUDE_OPTIONAL=true ;;
+          i) DO_INSTALL=true ;;
+          v) VERBOSE=true ;;
+          o) INCLUDE_OPTIONAL=true ;;
           *) echo "Unknown flag: -$ch" >&2; exit 2 ;;
         esac
-      done ;;
+      done
+      ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
