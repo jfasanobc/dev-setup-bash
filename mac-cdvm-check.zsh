@@ -2,9 +2,9 @@
 set -euo pipefail
 if [ -z "${ZSH_VERSION:-}" ]; then exec zsh "$0" "$@"; fi
 
-###############
-# Flags & env #
-###############
+########################################
+# Flags & Environment
+########################################
 DO_INSTALL=false
 VERBOSE=false
 INCLUDE_OPTIONAL=false
@@ -13,34 +13,30 @@ DEBUG_UI=false
 # Parse flags (supports -i -o -v in any combination)
 for arg in "$@"; do
   case "$arg" in
-    --install)            DO_INSTALL=true ;;
-    --verbose)            VERBOSE=true ;;
-    --optional-software)  INCLUDE_OPTIONAL=true ;;
-    --debug-ui)           DEBUG_UI=true ;;
+    --install|-i)           DO_INSTALL=true ;;
+    --verbose|-v)           VERBOSE=true ;;
+    --optional-software|-o) INCLUDE_OPTIONAL=true ;;
+    --debug-ui)             DEBUG_UI=true ;;
     --help|-h)
       cat <<USAGE
-Usage: $0 [--install|-i] [--verbose|-v] [--optional-software|-o] [--debug-ui]
+Usage: $0 [--install|-i] [--verbose|-v] [--optional-software|-o]
 USAGE
       exit 0 ;;
     --*) echo "Unknown flag: $arg" >&2; exit 2 ;;
     -*)
-      typeset ch
-      for ch in ${(s::)arg#-}; do
+      typeset ch; for ch in ${(s::)arg#-}; do
         case "$ch" in
-          i) DO_INSTALL=true ;;
-          v) VERBOSE=true ;;
-          o) INCLUDE_OPTIONAL=true ;;
+          i) DO_INSTALL=true ;; v) VERBOSE=true ;; o) INCLUDE_OPTIONAL=true ;;
           *) echo "Unknown flag: -$ch" >&2; exit 2 ;;
         esac
-      done
-      ;;
+      done ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
-####################
-# Pretty printing  #
-####################
+########################################
+# Pretty Printing
+########################################
 autoload -Uz colors; colors
 BOLD=$'%B'; DIM=$'%F{245}'; RED=$'%F{196}'; GREEN=$'%F{70}'; YELLOW=$'%F{178}'; BLUE=$'%F{39}'; RESET=$'%f%b'
 note() { print -P "${BLUE}${RESET} $*"; }
@@ -50,9 +46,9 @@ fail() { print -P "${RED}✘${RESET} $*"; }
 title(){ print -P "\n${BOLD}$*${RESET}"; }
 section(){ print -P "\n${BOLD}=== $* ===${RESET}"; }
 
-########################
-# Verbose runner       #
-########################
+########################################
+# Verbose Command Runner
+########################################
 vrun() {
   if $VERBOSE; then
     print -P "${DIM}$ ${(j: :)@}${RESET}"
@@ -62,9 +58,9 @@ vrun() {
   fi
 }
 
-#########################
-# Terminal helpers      #
-#########################
+########################################
+# Terminal / TUI Helpers
+########################################
 zmodload zsh/terminfo 2>/dev/null || true
 : ${terminfo[smcup]:=$'\e[?1049h'}
 : ${terminfo[rmcup]:=$'\e[?1049l'}
@@ -93,9 +89,7 @@ get_keypress() {
   REPLY="$k"; return 0
 }
 
-#########################
-# Menu (single/multi)   #
-#########################
+# Fallback simple prompts (non-interactive or piped)
 fallback_single_select() {
   local -a items; items=("$@"); local i
   for i in {1..${#items[@]}}; do print "$i) ${items[$i]}"; done
@@ -163,20 +157,27 @@ menu_multi_select() {
   done
 }
 
-#################
-# OS detection  #
-#################
+########################################
+# Host & State Helpers
+########################################
 ARCH="$(uname -m)"; APPLE_SILICON=false; [[ "$ARCH" == "arm64" ]] && APPLE_SILICON=true
 HOMEDIR="$HOME"; USER_SHORT="$(basename "$HOMEDIR")"; COMPANY_DOMAIN="bigcommerce.com"
 
 typeset -a TODO_ITEMS_TASKS=() TODO_ITEMS_MSGS=() RUN_LOG=()
 queue_issue(){ TODO_ITEMS_TASKS+=("$1"); TODO_ITEMS_MSGS+=("$2"); warn "$2"; RUN_LOG+=("! $2"); }
 
-############################
-# Task registry & helpers  #
-############################
-typeset -gA TASK_FN TASK_LABEL
-register_task(){ TASK_LABEL["$1"]="$2"; TASK_FN["$1"]="$3"; }
+########################################
+# Task labels (for UI only)
+########################################
+typeset -gA TASK_LABEL
+TASK_LABEL=(
+  brew            "Homebrew"
+  optional_first  "Optional Software (run first if selected)"
+  ssh             "SSH Configuration"
+  xcode           "Xcode & Command Line Tools"
+  ruby            "Ruby (rbenv) & 3.2.6"
+  github          "GitHub Setup & SSH"
+)
 
 append_unique_line_to_file(){
   local file="$1" line="$2"; touch "$file"; chmod 600 "$file"
@@ -195,9 +196,9 @@ ensure_ssh_agent_zshrc_lines() {
   append_unique_line_to_file "$zrc" '[ -f ~/.ssh/gcloud_ed25519 ] && ssh-add -q ~/.ssh/gcloud_ed25519 2>/dev/null'
 }
 
-################################
-# 1) Homebrew
-################################
+########################################
+# Task: Homebrew
+########################################
 task_brew() {
   section "Homebrew"
   local expected_prefix actual_prefix
@@ -223,9 +224,9 @@ task_brew() {
   fi
 }
 
-################################
-# 2) Optional Software (first) #
-################################
+########################################
+# Task: Optional Software
+########################################
 install_brew_pkg_if_needed() {
   local pkg="$1"
   if vrun "brew list --cask $pkg" || vrun "brew list $pkg"; then
@@ -251,9 +252,9 @@ task_optional_software() {
   else if $DO_INSTALL; then install_brew_pkg_if_needed "dbeaver-community"; else queue_issue "install_dbeaver" "DBeaver Community not installed."; fi; fi
 }
 
-################################
-# 3) SSH Configuration
-################################
+########################################
+# Task: SSH Configuration
+########################################
 generate_ssh_key(){
   local file="$HOME/.ssh/$1" comment="${2:-$USER_SHORT@$COMPANY_DOMAIN}"
   if [[ -f "$file" ]]; then warn "Key $file exists; skipping."; RUN_LOG+=("• $1 exists")
@@ -300,29 +301,56 @@ task_ssh() {
   fi
 }
 
-################################
-# 4) Xcode / Command Line Tools
-################################
+########################################
+# Task: Xcode / Command Line Tools
+########################################
 task_xcode() {
   section "Xcode / Command Line Tools"
   local have_clt=false have_xcode=false license_ok=false
-  if vrun "xcode-select -p"; then have_clt=true; ok "Command Line Tools installed."; RUN_LOG+=("• CLT installed")
-  else warn "CLT not installed."; queue_issue "clt_install" "Xcode CLT not installed."; fi
 
-  [[ -d /Applications/Xcode.app ]] && { have_xcode=true; ok "Xcode app installed."; } || warn "Xcode app not found."
+  # Check CLT
+  if vrun "xcode-select -p"; then
+    have_clt=true
+    ok "Command Line Tools installed."
+    RUN_LOG+=("• CLT installed")
+  else
+    warn "CLT not installed."
+    queue_issue "clt_install" "Xcode CLT not installed."
+  fi
 
-  if vrun "xcodebuild -license status"; then license_ok=true; ok "Xcode license accepted."
-  else warn "Xcode license not accepted."; queue_issue "xcode_license" "License not accepted."; fi
+  # Check Xcode app
+  if [[ -d /Applications/Xcode.app ]]; then
+    have_xcode=true
+    ok "Xcode app installed."
+  else
+    warn "Xcode app not found."
+  fi
 
+  # Check license acceptance (requires sudo)
+  if vrun "sudo xcodebuild -license status"; then
+    license_ok=true
+    ok "Xcode license accepted."
+  else
+    warn "Xcode license not accepted."
+    queue_issue "xcode_license" "License not accepted."
+  fi
+
+  # Install/fix if requested
   if $DO_INSTALL; then
-    $have_clt || { note "Triggering CLT installer (GUI)…"; vrun "xcode-select --install || true"; }
-    $license_ok || $have_xcode && { note "Opening Xcode license…"; vrun "sudo xcodebuild -license || true"; }
+    if ! $have_clt; then
+      note "Triggering CLT installer (GUI)…"
+      vrun "xcode-select --install || true"
+    fi
+    if ! $license_ok && $have_xcode; then
+      note "Opening Xcode license for acceptance (sudo required)…"
+      vrun "sudo xcodebuild -license accept || true"
+    fi
   fi
 }
 
-################################
-# 5) Ruby via rbenv
-################################
+########################################
+# Task: Ruby via rbenv
+########################################
 task_rbenv_ruby(){
   section "Ruby Environment (rbenv)"
   local want_ver="3.2.6" have_rbenv=false installed_v="" rbv=""
@@ -347,12 +375,7 @@ task_rbenv_ruby(){
 
   if ! grep -q 'rbenv init' "$HOME/.zshrc" 2>/dev/null; then
     note "Adding rbenv init to ~/.zshrc"
-    {
-      echo ''
-      echo '# rbenv init'
-      echo 'export PATH="$HOME/.rbenv/bin:$PATH"'
-      echo 'eval "$(rbenv init - zsh)"'
-    } >> "$HOME/.zshrc"
+    { echo ''; echo '# rbenv init'; echo 'export PATH="$HOME/.rbenv/bin:$PATH"'; echo 'eval "$(rbenv init - zsh)"'; } >> "$HOME/.zshrc"
     ok "Added rbenv init lines."; RUN_LOG+=("✓ rbenv init added to zshrc")
   else
     ok "~/.zshrc already initializes rbenv."
@@ -384,9 +407,9 @@ task_rbenv_ruby(){
   fi
 }
 
-################################
-# 6) GitHub
-################################
+########################################
+# Task: GitHub
+########################################
 ensure_github_host_config(){
   local cfg="$HOME/.ssh/config"; touch "$cfg"; chmod 600 "$cfg"
   if ! grep -q '^Host github.com' "$cfg"; then
@@ -408,60 +431,106 @@ EOF
 }
 task_github(){
   section "GitHub"
-  if vrun "ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes"; then
-    ok "SSH to GitHub works."; RUN_LOG+=("• SSH to GitHub OK")
-  else
-    warn "SSH to GitHub failed."; queue_issue "gh_ssh" "SSH to GitHub not working."
+
+  # --- Capture output + status safely even when exit != 0 (GitHub's normal case)
+  local out rc lower
+  set +e
+  out="$(ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes 2>&1)"
+  rc=$?
+  set -e
+  lower="${out:l}"
+
+  if $VERBOSE; then
+    print -P "${DIM}$ ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes${RESET}"
+    print -- "$out"
   fi
-  local gname gemail; gname="$(git config --global user.name || true)"; gemail="$(git config --global user.email || true)"
+
+  # Success if message indicates auth ok but no shell (GitHub's normal response)
+  if [[ "$lower" == *"successfully authenticated"* && "$lower" == *"does not provide shell access"* ]]; then
+    ok "SSH to GitHub works (authentication succeeded)."
+    RUN_LOG+=("• SSH to GitHub OK")
+  else
+    warn "SSH to GitHub not working."
+    queue_issue "gh_ssh" "SSH to GitHub not working."
+  fi
+
+  # Git config checks
+  local gname gemail
+  gname="$(git config --global user.name || true)"
+  gemail="$(git config --global user.email || true)"
   [[ -n "$gname"  ]] && ok "git user.name: $gname"  || { warn "git user.name not set";  queue_issue "git_name"  "git user.name not set"; }
   [[ -n "$gemail" ]] && ok "git user.email: $gemail" || { warn "git user.email not set"; queue_issue "git_email" "git user.email not set"; }
-  if [[ -f "$HOME/.ssh/config" ]] && grep -q '^Host github.com' "$HOME/.ssh/config"; then ok "~/.ssh/config has Host github.com"
-  else warn "~/.ssh/config missing Host github.com"; queue_issue "ssh_host_github" "Add Host github.com to ssh config."; fi
 
+  # SSH config host block
+  if [[ -f "$HOME/.ssh/config" ]] && grep -q '^Host github.com' "$HOME/.ssh/config"; then
+    ok "~/.ssh/config has Host github.com"
+  else
+    warn "~/.ssh/config missing Host github.com"
+    queue_issue "ssh_host_github" "Add Host github.com to ssh config."
+  fi
+
+  # Optional remediation flow
   if $DO_INSTALL; then
     local ghuser; print -n "Enter your GitHub username: "; read -r ghuser
     [[ -n "$ghuser" ]] && { vrun "git config --global user.name \"$ghuser\""; ok "Set git user.name to $ghuser"; RUN_LOG+=("✓ git user.name set"); }
     local email="$USER_SHORT@$COMPANY_DOMAIN"; vrun "git config --global user.email \"$email\""; ok "Set git user.email to $email"; RUN_LOG+=("✓ git user.email set")
-    [[ -f "$HOME/.ssh/gh_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/gh_ed25519\"" || { [[ -f "$HOME/.ssh/id_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/id_ed25519\"" || true; }
+
+    # Add an SSH key if present
+    [[ -f "$HOME/.ssh/gh_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/gh_ed25519\"" \
+      || { [[ -f "$HOME/.ssh/id_ed25519" ]] && vrun "ssh-add \"$HOME/.ssh/id_ed25519\"" || true; }
+
     ensure_github_host_config
-    if vrun "ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes"; then ok "SSH to GitHub now working."
+
+    # Re-check (again, avoid -e abort)
+    set +e
+    out="$(ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes 2>&1)"
+    rc=$?
+    set -e
+    lower="${out:l}"
+    $VERBOSE && { print -P "${DIM}$ ssh -T git@github.com -o StrictHostKeyChecking=no -o BatchMode=yes${RESET}"; print -- "$out"; }
+    if [[ "$lower" == *"successfully authenticated"* && "$lower" == *"does not provide shell access"* ]]; then
+      ok "SSH to GitHub now working."
     else
       warn "Still cannot SSH to GitHub."
       if vrun "command -v gh"; then note "Launching 'gh auth login'…"; vrun "gh auth login || true"; fi
       note "Docs: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account"
-      local keypath=""; [[ -f "$HOME/.ssh/gh_ed25519.pub" ]] && keypath="$HOME/.ssh/gh_ed25519.pub" || [[ -f "$HOME/.ssh/id_ed25519.pub" ]] && keypath="$HOME/.ssh/id_ed25519.pub"
+      local keypath=""
+      [[ -f "$HOME/.ssh/gh_ed25519.pub" ]] && keypath="$HOME/.ssh/gh_ed25519.pub" \
+        || [[ -f "$HOME/.ssh/id_ed25519.pub" ]] && keypath="$HOME/.ssh/id_ed25519.pub"
       [[ -n "$keypath" ]] && note "Public key to add: $keypath"
     fi
   fi
 }
 
 ########################################
-# Register tasks (before execution!)
+# Direct dispatcher (no array lookup)
 ########################################
-register_task "brew"            "Homebrew"                    "task_brew"
-register_task "optional_first"  "Optional Software (run first if selected)" "task_optional_software"
-register_task "ssh"             "SSH Configuration"           "task_ssh"
-register_task "xcode"           "Xcode & Command Line Tools"  "task_xcode"
-register_task "ruby"            "Ruby (rbenv) & 3.2.6"        "task_rbenv_ruby"
-register_task "github"          "GitHub Setup & SSH"          "task_github"
+run_task_by_id() {
+  case "$1" in
+    brew)            task_brew ;;
+    optional_first)  task_optional_software ;;
+    ssh)             task_ssh ;;
+    xcode)           task_xcode ;;
+    ruby)            task_rbenv_ruby ;;
+    github)          task_github ;;
+    *) warn "Unknown task id: $1" ;;
+  esac
+}
 
-########################
-# First selection flow #
-########################
+########################################
+# Mode Selection
+########################################
 title "Mode Selection"
-if $DO_INSTALL; then
-  ok "Install flag detected: proceeding with Checks & Install."
+if $DO_INSTALL; then ok "Install flag detected: proceeding with Checks & Install."
 else
   local top_choices=("Checks only" "Checks & Install")
-  print "Choose what to do:"
-  menu_single_select top_choices
+  print "Choose what to do:"; menu_single_select top_choices
   case "$REPLY" in 1) DO_INSTALL=false ;; 2) DO_INSTALL=true ;; esac
 fi
 
-#########################
-# Which tasks to run    #
-#########################
+########################################
+# Task Selection
+########################################
 typeset -a menu_to_task menu_items; menu_items=(); menu_to_task=()
 if $INCLUDE_OPTIONAL; then
   menu_items=("Homebrew" "Optional Software" "SSH" "Xcode" "Ruby (rbenv)" "GitHub")
@@ -470,96 +539,62 @@ else
   menu_items=("Homebrew" "SSH" "Xcode" "Ruby (rbenv)" "GitHub")
   menu_to_task=("brew" "ssh" "xcode" "ruby" "github")
 fi
-
 menu_multi_select menu_items
 
-# Visible summary of choices
 title "Selections"
 MODE_LABEL=$($DO_INSTALL && echo "Checks & Install" || echo "Checks only")
 print "Mode:          $MODE_LABEL"
 if (( ${#SELECTED_INDEXES[@]} )); then
-  print "Tasks chosen:"
-  for idx in "${SELECTED_INDEXES[@]}"; do print " - ${menu_items[$idx]}"; done
+  print "Tasks chosen:"; for idx in "${SELECTED_INDEXES[@]}"; do print " - ${menu_items[$idx]}"; done
 else
-  warn "No tasks selected—exiting."
-  exit 0
+  warn "No tasks selected—exiting."; exit 0
 fi
 
-#########################
-# Execute selected tasks#
-#########################
+########################################
+# Build Execution Order
+########################################
 typeset -a ordered_task_ids=()
 typeset idx tid have_optional=false
-for idx in "${SELECTED_INDEXES[@]}"; do
-  tid="${menu_to_task[$idx]}"
-  [[ "$tid" == "optional_first" ]] && have_optional=true
-done
+for idx in "${SELECTED_INDEXES[@]}"; do tid="${menu_to_task[$idx]}"; [[ "$tid" == "optional_first" ]] && have_optional=true; done
 $have_optional && ordered_task_ids+=("optional_first")
-for idx in "${SELECTED_INDEXES[@]}"; do
-  tid="${menu_to_task[$idx]}"
-  [[ "$tid" == "optional_first" ]] && continue
-  ordered_task_ids+=("$tid")
-done
+for idx in "${SELECTED_INDEXES[@]}"; do tid="${menu_to_task[$idx]}"; [[ "$tid" == "optional_first" ]] || ordered_task_ids+=("$tid"); done
 
-# Only initialize brew env if needed (brew or ruby selected)
+# Extra visibility in -v
+if $VERBOSE; then
+  print -P "${DIM}ordered_task_ids: ->${RESET}"
+  for t in "${ordered_task_ids[@]}"; do printf '[%q]\n' "$t"; done
+fi
+
+# Initialize brew env only if needed
 needs_brew=false
-for tid in "${ordered_task_ids[@]}"; do
-  [[ "$tid" == "brew" || "$tid" == "ruby" ]] && needs_brew=true
-done
-if $needs_brew && vrun "command -v brew"; then
-  vrun 'eval "$(/usr/bin/env brew shellenv)"'
-fi
+for tid in "${ordered_task_ids[@]}"; do [[ "$tid" == "brew" || "$tid" == "ruby" ]] && needs_brew=true; done
+if $needs_brew && vrun "command -v brew"; then vrun 'eval "$(/usr/bin/env brew shellenv)"'; fi
 
-# Run each selected task
+########################################
+# Execute Selected Tasks (direct dispatch)
+########################################
 for tid in "${ordered_task_ids[@]}"; do
-  fn="${TASK_FN[$tid]-}"
-  if [[ -n "$fn" ]]; then
-    "$fn"
-  else
-    warn "No handler registered for task id: $tid"
-  fi
+  run_task_by_id "$tid"
 done
 
-#######################################
-# Summary / outstanding items         #
-#######################################
+########################################
+# Summary / Outstanding Items
+########################################
 title "Summary"
-if (( ${#RUN_LOG[@]} )); then
-  for line in "${RUN_LOG[@]}"; do print " - $line"; done
-else
-  print " - No changes were necessary."
-fi
+if (( ${#RUN_LOG[@]} )); then for line in "${RUN_LOG[@]}"; do print " - $line"; done
+else print " - No changes were necessary."; fi
 
 if (( ${#TODO_ITEMS_MSGS[@]} )); then
-  print ""
-  warn "Items to fix (not resolved during this run):"
+  print ""; warn "Items to fix (not resolved during this run):"
   for msg in "${TODO_ITEMS_MSGS[@]}"; do print " - $msg"; done
-  print ""
-  print "Would you like to try to resolve any of these now?"
-  local again=("No (finish)" "Yes (select issues)"); menu_single_select again
-  if [[ "$REPLY" -eq 2 ]]; then
-    typeset -A dedup; local id; for id in "${TODO_ITEMS_TASKS[@]}"; do dedup["$id"]=1; done
-    typeset -a issue_ids issue_labels; for id _ in "${(@kv)dedup}"; do issue_ids+=("$id"); issue_labels+=("${TASK_LABEL[$id]:-$id}"); done
-    if (( ${#issue_ids[@]} )); then
-      menu_multi_select issue_labels
-      if (( ${#SELECTED_INDEXES[@]} )); then
-        for idx in "${SELECTED_INDEXES[@]}"; do
-          id="${issue_ids[$idx]}"; [[ -z "${TASK_FN[$id]-}" ]] && { warn "No direct handler for: $id"; continue; }
-          section "Attempting: ${TASK_LABEL[$id]:-$id}"
-          "${=TASK_FN[$id]}"
-        done
-      fi
-    fi
-  fi
 fi
 
-##############################################
-# Final: Suggest iTerm2 if not currently in  #
-##############################################
+########################################
+# Final: Suggest iTerm2 if Optional Shown
+########################################
 if $INCLUDE_OPTIONAL; then
   if [[ "${TERM_PROGRAM:-}" != "iTerm.app" ]]; then
-    print ""
-    print -n "Open iTerm2 now? (y/N): "; read -r openit
+    print ""; print -n "Open iTerm2 now? (y/N): "; read -r openit
     if [[ "$openit" == [yY]* ]]; then open -a "iTerm" && ok "iTerm2 launching…" || warn "Could not open iTerm2."; fi
     note "Consider closing Terminal and using iTerm2 going forward."
   fi
